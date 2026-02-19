@@ -41,11 +41,12 @@ func main() {
 	reader.FieldsPerRecord = -1
 	records, _ := reader.ReadAll()
 
-	// ТЕСТОВЫЕ ДАННЫЕ КЛИЕНТА
+	// ДАННЫЕ КЛИЕНТА
 	userBust := 102
-	fmt.Printf("\n👗 АМАНИ-ЭНДЖИН: РЕЗУЛЬТАТ ПОДБОРА (ОГ: %d см)\n", userBust)
-	fmt.Println(strings.Repeat("-", 45))
+	fmt.Printf("\n👗 АМАНИ-ЭНДЖИН: УМНЫЙ ПОДБОР (Ваш ОГ: %d см)\n", userBust)
+	fmt.Println(strings.Repeat("-", 50))
 
+	found := false
 	for i, row := range records {
 		if i == 0 || len(row) < 11 || row[0] == "" {
 			continue
@@ -54,17 +55,38 @@ func main() {
 		articul := row[0]
 		size := row[2]
 		bustRangeStr := row[3]
-		easeBust := row[10] // Колонка K: Свобода по груди
+		baseEaseStr := row[10] // Свобода для минимального порога (напр. для 96 см)
 
 		minBust, maxBust := parseRange(bustRangeStr)
+		baseEase, _ := strconv.Atoi(strings.TrimSpace(baseEaseStr))
 
 		if userBust >= minBust && userBust <= maxBust {
+			// --- ТВОЯ КРИТИЧЕСКАЯ ЛОГИКА ТУТ ---
+			// 1. На сколько см клиент больше минимального порога?
+			extraBody := userBust - minBust
+			// 2. Сколько воздуха реально останется?
+			realEase := baseEase - extraBody
+
 			fmt.Printf("✅ Артикул: %s | Размер: %s\n", articul, size)
-			fmt.Printf("   Посадка: Свобода в груди +%s см\n\n", easeBust)
-		} else if userBust > maxBust && userBust <= maxBust+4 {
-			fmt.Printf("⚠️ Артикул: %s | Размер: %s\n", articul, size)
-			fmt.Printf("   ВНИМАНИЕ: Будет сидеть плотно (впритык)\n\n")
+			fmt.Printf("   (Диапазон размера: %s см)\n", bustRangeStr)
+
+			// Вердикт на основе РЕАЛЬНОГО остатка воздуха
+			if realEase >= 20 {
+				fmt.Printf("   ВЕРДИКТ: Свободный OVERSIZE (запас %d см воздуха).\n", realEase)
+			} else if realEase >= 10 {
+				fmt.Printf("   ВЕРДИКТ: Комфортная посадка (запас %d см воздуха).\n", realEase)
+			} else if realEase > 0 {
+				fmt.Printf("   ВЕРДИКТ: Плотная посадка (запас всего %d см).\n", realEase)
+			} else {
+				fmt.Printf("   ВЕРДИКТ: Экстра-облегание (впритык).\n")
+			}
+			fmt.Println()
+			found = true
 		}
 	}
-	fmt.Println(strings.Repeat("-", 45))
+
+	if !found {
+		fmt.Println("❌ К сожалению, подходящих размеров не найдено.")
+	}
+	fmt.Println(strings.Repeat("-", 50))
 }
