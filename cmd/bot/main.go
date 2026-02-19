@@ -1,45 +1,70 @@
 package main
 
 import (
-	"amani-engine/internal/domain"
-	"amani-engine/internal/services/matcher"
+	"encoding/csv"
 	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
 )
 
+func parseRange(s string) (int, int) {
+	s = strings.ReplaceAll(s, "\"", "")
+	s = strings.Map(func(r rune) rune {
+		if (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return -1
+	}, s)
+
+	parts := strings.Split(s, "-")
+	if len(parts) != 2 {
+		return 0, 0
+	}
+	min, _ := strconv.Atoi(parts[0])
+	max, _ := strconv.Atoi(parts[1])
+	return min, max
+}
+
 func main() {
-	fmt.Println("=== AMANI Smart Engine: Тестирование алгоритма ===")
+	url := "https://docs.google.com/spreadsheets/d/e/2PACX-1vQk0u-g6Q0Y9EoqRshxLZiCPGr8Nulg971jZvIZ5XhDQUmqDygLm4CnJ6SkZwLLtO0LU_L2SkKNdHZg/pub?gid=1503408859&single=true&output=csv"
 
-	// 1. Имитируем данные от клиентки (например, из квиза в боте)
-	client := domain.UserParams{
-		Bust:   92.0, // Обхват груди 92 см
-		Waist:  70.0,
-		Hips:   98.0,
-		Height: 168.0,
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Println("Ошибка сети:", err)
+		return
 	}
+	defer resp.Body.Close()
 
-	// 2. Имитируем данные изделия (взяли первую колонку с твоего фото)
-	product := domain.ProductSpec{
-		SKU:         "SHIRT-SILK-01",
-		SizeLabel:   "44-46",
-		BustGarment: 125.0, // Тот самый оверсайз 125 см
-		HipsGarment: 116.0,
+	reader := csv.NewReader(resp.Body)
+	reader.LazyQuotes = true
+	reader.FieldsPerRecord = -1
+	records, _ := reader.ReadAll()
+
+	// ТЕСТОВЫЕ ДАННЫЕ КЛИЕНТА
+	userBust := 102
+	fmt.Printf("\n👗 АМАНИ-ЭНДЖИН: РЕЗУЛЬТАТ ПОДБОРА (ОГ: %d см)\n", userBust)
+	fmt.Println(strings.Repeat("-", 45))
+
+	for i, row := range records {
+		if i == 0 || len(row) < 11 || row[0] == "" {
+			continue
+		}
+
+		articul := row[0]
+		size := row[2]
+		bustRangeStr := row[3]
+		easeBust := row[10] // Колонка K: Свобода по груди
+
+		minBust, maxBust := parseRange(bustRangeStr)
+
+		if userBust >= minBust && userBust <= maxBust {
+			fmt.Printf("✅ Артикул: %s | Размер: %s\n", articul, size)
+			fmt.Printf("   Посадка: Свобода в груди +%s см\n\n", easeBust)
+		} else if userBust > maxBust && userBust <= maxBust+4 {
+			fmt.Printf("⚠️ Артикул: %s | Размер: %s\n", articul, size)
+			fmt.Printf("   ВНИМАНИЕ: Будет сидеть плотно (впритык)\n\n")
+		}
 	}
-
-	// 3. Запускаем "Мозг" (алгоритм подбора)
-	result := matcher.MatchSize(client, product)
-
-	// 4. Выводим результат в консоль
-	fmt.Printf("\nПараметры клиента: Грудь %.1f см", client.Bust)
-	fmt.Printf("\nПараметры изделия (%s): Грудь %.1f см", product.SizeLabel, product.BustGarment)
-	fmt.Println("\n-------------------------------------------")
-
-	if result.IsFit {
-		fmt.Printf("ВЕРДИКТ: РЕКОМЕНДОВАНО ✅\n")
-		fmt.Printf("Размер: %s\n", result.RecommendedSize)
-		fmt.Printf("Комментарий стилиста: %s\n", result.Comment)
-	} else {
-		fmt.Printf("ВЕРДИКТ: НЕ ПОДХОДИТ ❌\n")
-		fmt.Printf("Причина: %s\n", result.Comment)
-	}
-	fmt.Println("-------------------------------------------")
+	fmt.Println(strings.Repeat("-", 45))
 }
