@@ -1,92 +1,89 @@
 package main
 
 import (
-	"encoding/csv"
+	"database/sql"
 	"fmt"
-	"net/http"
-	"strconv"
+	"log"
 	"strings"
+
+	_ "github.com/lib/pq"
 )
 
-func parseRange(s string) (int, int) {
-	s = strings.ReplaceAll(s, "\"", "")
-	s = strings.Map(func(r rune) rune {
-		if (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		return -1
-	}, s)
-
-	parts := strings.Split(s, "-")
-	if len(parts) != 2 {
-		return 0, 0
-	}
-	min, _ := strconv.Atoi(parts[0])
-	max, _ := strconv.Atoi(parts[1])
-	return min, max
-}
-
 func main() {
-	url := "https://docs.google.com/spreadsheets/d/e/2PACX-1vQk0u-g6Q0Y9EoqRshxLZiCPGr8Nulg971jZvIZ5XhDQUmqDygLm4CnJ6SkZwLLtO0LU_L2SkKNdHZg/pub?gid=1503408859&single=true&output=csv"
-
-	resp, err := http.Get(url)
+	connStr := "host=localhost port=5432 user=postgres password=qwerty123 dbname=postgres sslmode=disable"
+	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		fmt.Println("Ошибка сети:", err)
-		return
+		log.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer db.Close()
 
-	reader := csv.NewReader(resp.Body)
-	reader.LazyQuotes = true
-	reader.FieldsPerRecord = -1
-	records, _ := reader.ReadAll()
+	// Данные клиентки Plus Size
+	targetArticul := "04042"
+	userBust := 106
+	userWaist := 88
+	userHips := 115
 
-	// ДАННЫЕ КЛИЕНТА
-	userBust := 102
-	fmt.Printf("\n👗 АМАНИ-ЭНДЖИН: УМНЫЙ ПОДБОР (Ваш ОГ: %d см)\n", userBust)
-	fmt.Println(strings.Repeat("-", 50))
+	fmt.Printf("🤖 AI-СТИЛИСТ AMANI (Экспертный вердикт)\n")
+	fmt.Println(strings.Repeat("=", 50))
 
-	found := false
-	for i, row := range records {
-		if i == 0 || len(row) < 11 || row[0] == "" {
-			continue
-		}
+	query := `
+		SELECT size_name, category, ease_allowance_cm, 
+		       bust_min, bust_max, waist_min, waist_max, hips_min, hips_max
+		FROM product_metadata 
+		WHERE sku = $1
+		ORDER BY bust_max ASC
+	`
+	rows, err := db.Query(query, targetArticul)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
 
-		articul := row[0]
-		size := row[2]
-		bustRangeStr := row[3]
-		baseEaseStr := row[10] // Свобода для минимального порога (напр. для 96 см)
+	type BestMatch struct {
+		Size  string
+		Ease  int
+		Score float64 // Насколько размер близок к идеалу
+	}
+	var best *BestMatch
 
-		minBust, maxBust := parseRange(bustRangeStr)
-		baseEase, _ := strconv.Atoi(strings.TrimSpace(baseEaseStr))
+	for rows.Next() {
+		var sizeName, category string
+		var easeBase, bMin, bMax, wMin, wMax, hMin, hMax int
+		rows.Scan(&sizeName, &category, &easeBase, &bMin, &bMax, &wMin, &wMax, &hMin, &hMax)
 
-		if userBust >= minBust && userBust <= maxBust {
-			// --- ТВОЯ КРИТИЧЕСКАЯ ЛОГИКА ТУТ ---
-			// 1. На сколько см клиент больше минимального порога?
-			extraBody := userBust - minBust
-			// 2. Сколько воздуха реально останется?
-			realEase := baseEase - extraBody
+		// Проверки на физическое соответствие
+		bustOk := userBust >= (bMin-4) && userBust <= (bMax+4)
+		waistOk := (wMax == 0) || (userWaist <= wMax+8)
+		hipsOk := (hMax == 0) || (userHips <= hMax+8)
 
-			fmt.Printf("✅ Артикул: %s | Размер: %s\n", articul, size)
-			fmt.Printf("   (Диапазон размера: %s см)\n", bustRangeStr)
+		if bustOk && waistOk && hipsOk {
+			currentEase := (bMax + easeBase) - userBust
 
-			// Вердикт на основе РЕАЛЬНОГО остатка воздуха
-			if realEase >= 20 {
-				fmt.Printf("   ВЕРДИКТ: Свободный OVERSIZE (запас %d см воздуха).\n", realEase)
-			} else if realEase >= 10 {
-				fmt.Printf("   ВЕРДИКТ: Комфортная посадка (запас %d см воздуха).\n", realEase)
-			} else if realEase > 0 {
-				fmt.Printf("   ВЕРДИКТ: Плотная посадка (запас всего %d см).\n", realEase)
-			} else {
-				fmt.Printf("   ВЕРДИКТ: Экстра-облегание (впритык).\n")
+			// Считаем отклонение от "задуманной" свободы облегания
+			// Чем меньше разница между реальной свободой и базовой — тем лучшеScore
+			diff := float64(currentEase - easeBase)
+			if diff < 0 {
+				diff = -diff
+			} // Берем модуль
+
+			if best == nil || diff < best.Score {
+				best = &BestMatch{
+					Size:  sizeName,
+					Ease:  currentEase,
+					Score: diff,
+				}
 			}
-			fmt.Println()
-			found = true
 		}
 	}
 
-	if !found {
-		fmt.Println("❌ К сожалению, подходящих размеров не найдено.")
+	if best != nil {
+		fmt.Println("💬 ВЕРДИКТ СТИЛИСТА:")
+		fmt.Printf("Для ваших параметров идеально подходит размер: **%s**.\n", best.Size)
+		fmt.Printf("Посадка будет именно такой, как задумано дизайнером (свобода %d см).\n", best.Ease)
+		fmt.Println("Этот размер гарантирует комфорт и сохранение правильного силуэта модели.")
+	} else {
+		fmt.Println("💬 ВЕРДИКТ СТИЛИСТА:")
+		fmt.Println("К сожалению, эта модель не сядет на ваши параметры так, как это предусмотрено стандартами бренда.")
+		fmt.Println("Рекомендую обратить внимание на модели другого кроя.")
 	}
-	fmt.Println(strings.Repeat("-", 50))
 }
