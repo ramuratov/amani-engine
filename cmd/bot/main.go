@@ -3,7 +3,9 @@ package main
 import (
 	"database/sql"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -18,9 +20,36 @@ const (
 	dbConnStr = "host=localhost port=5432 user=postgres password=qwerty123 dbname=postgres sslmode=disable"
 	botToken  = "8236828498:AAHgcFlXaab-lqp8Z-5Oom5JVCgb2CanDqM"
 	csvURL    = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQk0u-g6Q0Y9EoqRshxLZiCPGr8Nulg971jZvIZ5XhDQUmqDygLm4CnJ6SkZwLLtO0LU_L2SkKNdHZg/pub?gid=1503408859&single=true&output=csv"
+	msToken   = "7b10aaf4f6c38ab25c9930699a3d3de09e82d25b"
 )
 
-// parseRange разделяет "88-92" на min=88, max=92
+func getMSData(articul string) (string, string) {
+	client := &http.Client{}
+	url := fmt.Sprintf("https://online.moysklad.ru/api/remap/1.2/entity/product?filter=article=%s", articul)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer "+msToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "Модель AMANI", ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var data struct {
+		Rows []struct {
+			Name       string `json:"name"`
+			SalePrices []struct {
+				Value float64 `json:"value"`
+			} `json:"salePrices"`
+		} `json:"rows"`
+	}
+	json.Unmarshal(body, &data)
+	if len(data.Rows) > 0 {
+		price := data.Rows[0].SalePrices[0].Value / 100
+		return data.Rows[0].Name, fmt.Sprintf("%.0f ₸", price)
+	}
+	return "Модель AMANI", ""
+}
+
 func parseRange(s string) (int, int) {
 	s = strings.TrimSpace(s)
 	if s == "" || s == "-" {
@@ -37,7 +66,11 @@ func parseRange(s string) (int, int) {
 }
 
 func syncData(db *sql.DB) {
-	fmt.Printf("🔄 [%s] Авто-синхронизация с Google Таблицей...\n", time.Now().Format("15:04:05"))
+	if db == nil {
+		log.Println("❌ Ошибка: База данных не инициализирована")
+		return
+	}
+	fmt.Printf("🔄 [%s] Синхронизация с таблицей...\n", time.Now().Format("15:04:05"))
 
 	resp, err := http.Get(csvURL)
 	if err != nil {
@@ -53,37 +86,35 @@ func syncData(db *sql.DB) {
 		return
 	}
 
-	_, _ = db.Exec("DELETE FROM product_metadata")
+	_, err = db.Exec("DELETE FROM product_metadata")
+	if err != nil {
+		log.Println("❌ Ошибка очистки базы:", err)
+		return
+	}
 
 	for i, record := range records {
-		if i == 0 || len(record) < 11 || record[0] == "" {
+		if i == 0 || len(record) < 15 || record[0] == "" {
 			continue
 		}
 
 		sku := record[0]
-		category := record[1]
-		sizeName := record[2]
-
-		// Парсим диапазоны из колонок D, E, F (индексы 3, 4, 5)
+		cat := record[1]
+		size := record[2]
 		bMin, bMax := parseRange(record[3])
 		wMin, wMax := parseRange(record[4])
 		hMin, hMax := parseRange(record[5])
+		ease, _ := strconv.Atoi(record[10])
+		rMin, _ := strconv.Atoi(record[13])
+		rMax, _ := strconv.Atoi(record[14])
 
-		// Свобода из колонки K (индекс 10)
-		ease, _ := strconv.Atoi(strings.TrimSpace(record[10]))
-
-		_, err := db.Exec(`
-			INSERT INTO product_metadata (
-				sku, category, size_name, ease_allowance_cm, 
-				bust_min, bust_max, waist_min, waist_max, hips_min, hips_max
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-			sku, category, sizeName, ease, bMin, bMax, wMin, wMax, hMin, hMax)
+		_, err = db.Exec(`INSERT INTO product_metadata (sku, category, size_name, ease_allowance_cm, bust_min, bust_max, waist_min, waist_max, hips_min, hips_max, height_min, height_max) 
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			sku, cat, size, ease, bMin, bMax, wMin, wMax, hMin, hMax, rMin, rMax)
 		if err != nil {
-			log.Println("❌ Ошибка вставки артикула", sku, ":", err)
+			log.Println("❌ Ошибка вставки строки:", err)
 		}
 	}
-	fmt.Println("✅ База данных успешно обновлена!")
+	fmt.Println("✅ База обновлена.")
 }
 
 func main() {
@@ -93,7 +124,6 @@ func main() {
 	}
 	defer db.Close()
 
-	// Запуск фоновой синхронизации (раз в 24 часа)
 	go func() {
 		for {
 			syncData(db)
@@ -109,69 +139,80 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Println("🚀 AMANI ENGINE запущена. Бот онлайн.")
+	menu := &telebot.ReplyMarkup{}
+	btnHelp := menu.Text("📏 Как сделать замеры?")
+	menu.Reply(menu.Row(btnHelp))
 
 	bot.Handle("/start", func(m *telebot.Message) {
-		bot.Send(m.Sender, "Привет! Я AI-стилист AMANI. ✨\n\nПришлите: `АРТИКУЛ ОГ-ОТ-ОБ` (напр. `04042 92-74-100`)", telebot.ModeMarkdown)
+		bot.Send(m.Sender, "Привет! Я AI-стилист AMANI. ✨\n\nПришлите: `АРТИКУЛ ОГ-ОТ-ОБ-РОСТ` \n(например: `04042 92-74-100-168`)", menu)
+	})
+
+	bot.Handle(&btnHelp, func(m *telebot.Message) {
+		photo := &telebot.Photo{File: telebot.FromDisk("guide.jpg")}
+		photo.Caption = "📐 **Инструкция по замерам AMANI**\n\nПожалуйста, используйте схему выше. Замеры лучше делать в тонком белье на выдохе."
+		_, err := bot.Send(m.Sender, photo, telebot.ModeMarkdown)
+		if err != nil {
+			log.Println("❌ Ошибка отправки фото:", err)
+			bot.Send(m.Sender, "Ошибка: файл guide.jpg не найден в папке проекта.")
+		}
 	})
 
 	bot.Handle(telebot.OnText, func(m *telebot.Message) {
 		parts := strings.Fields(m.Text)
 		if len(parts) < 2 {
-			bot.Send(m.Sender, "Формат: `АРТИКУЛ ОГ-ОТ-ОБ`")
 			return
 		}
-
 		sku := parts[0]
 		params := strings.Split(parts[1], "-")
 		if len(params) < 3 {
-			bot.Send(m.Sender, "Нужно 3 параметра: ОГ-ОТ-ОБ")
 			return
 		}
-
-		var uB, uW, uH int
-		fmt.Sscanf(params[0], "%d", &uB)
-		fmt.Sscanf(params[1], "%d", &uW)
-		fmt.Sscanf(params[2], "%d", &uH)
-
-		rows, err := db.Query("SELECT size_name, ease_allowance_cm, bust_min, bust_max, waist_max, hips_max FROM product_metadata WHERE sku = $1", sku)
-		if err != nil {
-			bot.Send(m.Sender, "Ошибка базы данных.")
-			return
+		var uB, uW, uH, uR int
+		_, _ = fmt.Sscanf(params[0], "%d", &uB)
+		_, _ = fmt.Sscanf(params[1], "%d", &uW)
+		_, _ = fmt.Sscanf(params[2], "%d", &uH)
+		if len(params) > 3 {
+			_, _ = fmt.Sscanf(params[3], "%d", &uR)
 		}
+
+		prodName, price := getMSData(sku)
+		rows, _ := db.Query("SELECT size_name, ease_allowance_cm, bust_min, bust_max, waist_min, waist_max, hips_min, hips_max, height_min, height_max FROM product_metadata WHERE sku = $1", sku)
 		defer rows.Close()
 
 		var bestSize string
-		var bestEase int
-		minDiff := 999.0
+		var hWarn string
 
 		for rows.Next() {
 			var sn string
-			var eB, bMin, bMax, wMax, hMax int
-			rows.Scan(&sn, &eB, &bMin, &bMax, &wMax, &hMax)
+			var eb, bMin, bMax, wMin, wMax, hMin, hMax, rMin, rMax int
+			_ = rows.Scan(&sn, &eb, &bMin, &bMax, &wMin, &wMax, &hMin, &hMax, &rMin, &rMax)
 
-			// Экспертная логика (Золотое сечение)
-			if uB >= (bMin-6) && uB <= (bMax+4) && (wMax == 0 || uW <= wMax+8) && (hMax == 0 || uH <= hMax+8) {
-				currEase := (bMax + eB) - uB
-				diff := float64(currEase - eB)
-				if diff < 0 {
-					diff = -diff
+			if uB >= (bMin-4) && uB <= (bMax+4) {
+				bestSize = sn
+				if wMax > 0 && uW > (wMax+6) {
+					hWarn += "\n⚠️ *Модель может быть плотной в талии.*"
 				}
-
-				if diff < minDiff {
-					minDiff = diff
-					bestSize = sn
-					bestEase = currEase
+				if hMax > 0 && uH > (hMax+6) {
+					hWarn += "\n⚠️ *Модель может быть плотной в бедрах.*"
 				}
+				if uR > 0 && rMin > 0 && (uR < rMin || uR > rMax) {
+					hWarn += fmt.Sprintf("\n⚠️ *На ваш рост (%d см) модель может сесть иначе (стандарт: %d-%d см).* ", uR, rMin, rMax)
+				}
+				break
 			}
 		}
 
 		if bestSize != "" {
-			bot.Send(m.Sender, fmt.Sprintf("✅ **Ваш идеальный размер: %s**\n\nЗапас воздуха по груди: %d см.\nПосадка будет соответствовать задумке дизайнера.", bestSize, bestEase), telebot.ModeMarkdown)
+			res := fmt.Sprintf("👗 **%s**\n💰 Цена: %s\n\n✅ Ваш рекомендуемый размер: **%s**\n%s\n\nЖелаете оформить заказ?", prodName, price, bestSize, hWarn)
+			shopMenu := &telebot.ReplyMarkup{}
+			btnOrder := shopMenu.URL("🛍️ Написать менеджеру", "https://t.me/amani_manager")
+			shopMenu.Inline(shopMenu.Row(btnOrder))
+			bot.Send(m.Sender, res, telebot.ModeMarkdown, shopMenu)
 		} else {
-			bot.Send(m.Sender, "❌ К сожалению, модель не подходит под ваши параметры. Рекомендуем присмотреться к другому крою.")
+			bot.Send(m.Sender, "К сожалению, модель не подходит под ваши параметры.")
 		}
 	})
 
+	fmt.Println("🚀 AMANI ENGINE запущена. Бот онлайн.")
 	bot.Start()
 }
